@@ -1,0 +1,516 @@
+{
+  "name": "AI Contract Review & Risk Flagging System",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "1o_mvuTFO2TvJpn9wnzrkceAYbwWu34Sx",
+          "mode": "list",
+          "cachedResultName": "Contracts",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1o_mvuTFO2TvJpn9wnzrkceAYbwWu34Sx"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "cba933f8-1227-4b3d-a008-a6f00e625bc3",
+      "name": "Watch Contracts Folder",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1200,
+        272
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "OYi828u49wwTNdxa",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "Create a Google Drive folder called 'Contracts for Review'. Any PDF uploaded here triggers the workflow automatically."
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "2593edbc-3ecc-4510-b051-8ac1f67a6d25",
+      "name": "Download Contract PDF",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -976,
+        272
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "OYi828u49wwTNdxa",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "Downloads the PDF binary from Google Drive for text extraction"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "0484649e-6ebd-4bc4-b837-53cfdef3132f",
+      "name": "Extract Text from PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -752,
+        272
+      ],
+      "notes": "Extracts raw text content from the contract PDF"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Date formatter ─────────────────────────────────────\nfunction formatDate(date) {\n  const d = new Date(date);\n  if (isNaN(d)) return '';\n  return String(d.getDate()).padStart(2,'0') + '/' +\n         String(d.getMonth()+1).padStart(2,'0') + '/' +\n         d.getFullYear();\n}\n\nconst fileData = $('Watch Contracts Folder').first().json;\nconst extractedData = $input.first().json;\n\n// Get contract text\nconst contractText = extractedData.text || extractedData.content || '';\n\n// Truncate to 12000 chars to stay within token limits\nconst truncatedText = contractText.length > 12000\n  ? contractText.substring(0, 12000) + '\\n\\n[Document truncated for processing — full review may require multiple passes]'\n  : contractText;\n\n// File metadata\nconst fileName = fileData.name || 'Unknown Contract';\nconst fileId = fileData.id || '';\nconst uploadedAt = formatDate(new Date());\nconst reviewId = 'REV-' + Date.now().toString().slice(-8);\n\nreturn [{\n  json: {\n    review_id: reviewId,\n    file_name: fileName,\n    file_id: fileId,\n    contract_text: truncatedText,\n    char_count: contractText.length,\n    uploaded_at: uploadedAt,\n    drive_link: `https://drive.google.com/file/d/${fileId}/view`\n  }\n}];"
+      },
+      "id": "46e33166-35c5-4a13-98a9-63a848931e58",
+      "name": "Prepare Contract Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Get AI Agent output ─────────────────────────────────\nconst agentOutput = $input.first().json.output || \n                    $input.first().json.text || \n                    $input.first().json || '';\n\nconst contractData = $('Prepare Contract Data').first().json;\n\n// ── Parse the JSON from agent output ───────────────────\nlet analysis;\ntry {\n  const raw = typeof agentOutput === 'string' ? agentOutput : JSON.stringify(agentOutput);\n  const cleaned = raw.replace(/```json|```/g, '').trim();\n  analysis = JSON.parse(cleaned);\n} catch(e) {\n  // If agent already returned a parsed object\n  if (typeof agentOutput === 'object' && agentOutput.contract_type) {\n    analysis = agentOutput;\n  } else {\n    analysis = {\n      contract_type: 'Unknown',\n      parties: ['Unknown'],\n      contract_date: 'Unknown',\n      contract_duration: 'Unknown',\n      overall_risk_level: 'HIGH',\n      risk_score: 0,\n      executive_summary: 'Unable to parse AI response. Please review manually.',\n      red_flags: [],\n      missing_clauses: [],\n      key_obligations: [],\n      payment_terms: 'Not parsed',\n      termination_clauses: 'Not parsed',\n      liability_cap: 'Not parsed',\n      governing_law: 'Not parsed',\n      recommendation: 'MANUAL REVIEW REQUIRED',\n      next_steps: 'AI parsing failed. Please review contract manually.'\n    };\n  }\n}\n\n// ── Risk level mapping ──────────────────────────────────\nconst riskEmoji = {\n  'LOW': ':white_check_mark:',\n  'MEDIUM': ':warning:',\n  'HIGH': ':rotating_light:',\n  'CRITICAL': ':sos:',\n  'UNKNOWN': ':question:'\n};\n\nconst riskColor = {\n  'LOW': '#22c55e',\n  'MEDIUM': '#f59e0b',\n  'HIGH': '#ef4444',\n  'CRITICAL': '#7f1d1d',\n  'UNKNOWN': '#6b7280'\n};\n\nconst riskLevel = (analysis.overall_risk_level || 'UNKNOWN').toUpperCase();\n\n// ── Build Slack red flags text ──────────────────────────\nconst redFlagsSlack = (analysis.red_flags || []).map((f, i) =>\n  `${i+1}. *${f.clause}* [${f.severity}]\\n   ${f.issue}\\n   _Fix: ${f.recommendation}_`\n).join('\\n\\n') || 'No red flags identified.';\n\n// ── Build HTML red flags for email ─────────────────────\nconst redFlagsHtml = (analysis.red_flags || []).map(f => {\n  const c = f.severity === 'HIGH' || f.severity === 'CRITICAL'\n    ? '#dc2626' : f.severity === 'MEDIUM' ? '#d97706' : '#16a34a';\n  return `<tr>\n    <td style=\"padding:9px;border-bottom:1px solid #f0f0f0\"><strong>${f.clause}</strong></td>\n    <td style=\"padding:9px;border-bottom:1px solid #f0f0f0;color:#444\">${f.issue}</td>\n    <td style=\"padding:9px;border-bottom:1px solid #f0f0f0;color:${c};font-weight:bold;white-space:nowrap\">${f.severity}</td>\n    <td style=\"padding:9px;border-bottom:1px solid #f0f0f0;color:#555;font-size:12px\">${f.recommendation}</td>\n  </tr>`;\n}).join('') || '<tr><td colspan=\"4\" style=\"padding:10px;color:#555\">No red flags identified.</td></tr>';\n\n// ── Build HTML missing clauses ──────────────────────────\nconst missingHtml = (analysis.missing_clauses || []).map(m =>\n  `<li style=\"margin-bottom:8px\"><strong>${m.clause}</strong> — ${m.why_important}</li>`\n).join('') || '<li style=\"color:#555\">No missing clauses identified.</li>';\n\n// ── Build HTML obligations ──────────────────────────────\nconst obligationsHtml = (analysis.key_obligations || []).map(o =>\n  `<tr>\n    <td style=\"padding:8px;border-bottom:1px solid #f0f0f0\"><strong>${o.party}</strong></td>\n    <td style=\"padding:8px;border-bottom:1px solid #f0f0f0;color:#444\">${o.obligation}</td>\n  </tr>`\n).join('') || '<tr><td colspan=\"2\" style=\"padding:8px;color:#555\">No obligations identified.</td></tr>';\n\n// ── Recommendation badge color ──────────────────────────\nconst recColor = analysis.recommendation === 'APPROVE'\n  ? '#16a34a'\n  : analysis.recommendation === 'APPROVE WITH CHANGES'\n  ? '#d97706' : '#dc2626';\n\n// ── Parties as readable string ──────────────────────────\nconst partiesText = Array.isArray(analysis.parties)\n  ? analysis.parties.join(' & ')\n  : (analysis.parties || 'Unknown');\n\nreturn [{\n  json: {\n    // Contract metadata\n    review_id:              contractData.review_id || 'REV-000000',\n    file_name:              contractData.file_name || 'Unknown',\n    file_id:                contractData.file_id || '',\n    drive_link:             contractData.drive_link || '',\n    uploaded_at:            contractData.uploaded_at || '',\n\n    // AI analysis fields\n    contract_type:          analysis.contract_type || 'Unknown',\n    parties_text:           partiesText,\n    contract_date:          analysis.contract_date || 'Unknown',\n    contract_duration:      analysis.contract_duration || 'Unknown',\n    overall_risk_level:     riskLevel,\n    risk_score:             analysis.risk_score || 0,\n    executive_summary:      analysis.executive_summary || '',\n    payment_terms:          analysis.payment_terms || 'Not specified',\n    termination_clauses:    analysis.termination_clauses || 'Not specified',\n    liability_cap:          analysis.liability_cap || 'Not specified',\n    governing_law:          analysis.governing_law || 'Not specified',\n    recommendation:         analysis.recommendation || 'MANUAL REVIEW REQUIRED',\n    next_steps:             analysis.next_steps || '',\n    red_flags_count:        (analysis.red_flags || []).length,\n    missing_clauses_count:  (analysis.missing_clauses || []).length,\n\n    // Formatted outputs\n    risk_emoji:             riskEmoji[riskLevel] || ':question:',\n    risk_color:             riskColor[riskLevel] || '#6b7280',\n    recommendation_color:   recColor,\n    red_flags_slack:        redFlagsSlack,\n    red_flags_html:         redFlagsHtml,\n    missing_clauses_html:   missingHtml,\n    obligations_html:       obligationsHtml\n  }\n}];"
+      },
+      "id": "d6903531-658b-41ce-91b7-0ed38abfb5e4",
+      "name": "Parse & Format Risk Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0ALEPF2GGK",
+          "mode": "list",
+          "cachedResultName": "contracts"
+        },
+        "text": "={{ $json.risk_emoji }} *Contract Review Complete — {{ $json.file_name }}*\n\n*Review ID:* {{ $json.review_id }}\n*Contract Type:* {{ $json.contract_type }}\n*Parties:* {{ $json.parties_text }}\n*Contract Date:* {{ $json.contract_date }}\n*Overall Risk:* {{ $json.overall_risk_level }}\n*Recommendation:* {{ $json.recommendation }}\n\n*Summary:*\n{{ $json.executive_summary }}\n\n*Red Flags Found ({{ $json.red_flags_count }}):*\n{{ $json.red_flags_slack }}\n\n*Payment Terms:* {{ $json.payment_terms }}\n*Termination:* {{ $json.termination_clauses }}\n*Governing Law:* {{ $json.governing_law }}\n\n*Next Steps:*\n{{ $json.next_steps }}\n\n<{{ $json.drive_link }}|View Original Contract in Google Drive>",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": true
+        }
+      },
+      "id": "c1e492fd-3636-4559-932f-6b584a6ef232",
+      "name": "Slack — Risk Report Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [
+        272,
+        80
+      ],
+      "webhookId": "729dbdd2-44bf-455b-b087-a542f49536ff",
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "Y",
+          "name": "Slack account"
+        }
+      },
+      "notes": "Replace YOUR_SLACK_CHANNEL_ID with your legal or contracts team channel ID"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "14CJ6piBEDE_it2rhzJ4gj6IyIf_TUEyGBN3oGRjmMz0",
+          "mode": "list",
+          "cachedResultName": "Contract Review",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/14CJ6piBEDE_it2rhzJ4gj6IyIf_TUEyGBN3oGRjmMz0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/14CJ6piBEDE_it2rhzJ4gj6IyIf_TUEyGBN3oGRjmMz0/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Review ID": "={{ $json.review_id }}",
+            "File Name": "={{ $json.file_name }}",
+            "Contract Type": "={{ $json.contract_type }}",
+            "Parties": "={{ $('AI Agent').item.json.output.parties }}",
+            "Contract Date": "={{ $json.contract_date }}",
+            "Risk Level": "={{ $json.overall_risk_level }}",
+            "Red Flags": "={{ $json.red_flags_count }}",
+            "Missing Clauses": "={{ $json.missing_clauses_count }}",
+            "Recommendation": "={{ $('AI Agent').item.json.output.recommendation }}",
+            "Payment Terms": "={{ $json.payment_terms }}",
+            "Governing Law": "={{ $json.governing_law }}",
+            "Drive Link": "={{ $json.drive_link }}",
+            "Reviewed At": "={{ $now.format('yyyy-MM-dd') }}",
+            "Status": "reviewed"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Review ID",
+              "displayName": "Review ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "File Name",
+              "displayName": "File Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contract Type",
+              "displayName": "Contract Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Parties",
+              "displayName": "Parties",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contract Date",
+              "displayName": "Contract Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Risk Level",
+              "displayName": "Risk Level",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Red Flags",
+              "displayName": "Red Flags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Missing Clauses",
+              "displayName": "Missing Clauses",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Recommendation",
+              "displayName": "Recommendation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Payment Terms",
+              "displayName": "Payment Terms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Governing Law",
+              "displayName": "Governing Law",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Drive Link",
+              "displayName": "Drive Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Reviewed At",
+              "displayName": "Reviewed At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "e9a8830c-54dc-45e7-87e1-8f605e02f0f0",
+      "name": "Log Review to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        272
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Om45LiQ88EUiTnQ7",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Keeps a full audit trail of every contract reviewed. Create a sheet called Contract Reviews with the listed column headers."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are reviewing the following contract. Analyze it thoroughly and return your full risk report.\n\nContract File: {{ $json.file_name }}\nReview ID: {{ $json.review_id }}\nUploaded: {{ $json.uploaded_at }}\n\nCONTRACT TEXT:\n{{ $json.contract_text }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a senior legal contract analyst with 20 years of experience reviewing commercial contracts. Your job is to review contracts thoroughly and identify risks, unfair clauses, missing protections, and key obligations.\n\nAlways respond ONLY with a valid JSON object. No markdown, no backticks, no preamble. Return exactly this structure:\n\n{\n  \"contract_type\": \"type of contract e.g. Service Agreement, NDA, Employment Contract\",\n  \"parties\": [\"Party 1 name\", \"Party 2 name\"],\n  \"contract_date\": \"date found in contract or Unknown\",\n  \"contract_duration\": \"duration or term of the contract\",\n  \"overall_risk_level\": \"LOW or MEDIUM or HIGH or CRITICAL\",\n  \"risk_score\": 0,\n  \"executive_summary\": \"2-3 sentence plain English summary of what this contract is about and its overall risk\",\n  \"red_flags\": [\n    {\n      \"clause\": \"name of the clause\",\n      \"issue\": \"plain English explanation of the problem\",\n      \"severity\": \"HIGH or MEDIUM or LOW\",\n      \"recommendation\": \"what to do about it\"\n    }\n  ],\n  \"missing_clauses\": [\n    {\n      \"clause\": \"name of missing clause\",\n      \"why_important\": \"why this clause should be included\"\n    }\n  ],\n  \"key_obligations\": [\n    {\n      \"party\": \"which party\",\n      \"obligation\": \"what they must do\"\n    }\n  ],\n  \"payment_terms\": \"summary of payment terms found or Not specified\",\n  \"termination_clauses\": \"summary of termination conditions or Not specified\",\n  \"liability_cap\": \"liability limitations found or Not specified\",\n  \"governing_law\": \"jurisdiction and governing law or Not specified\",\n  \"recommendation\": \"APPROVE or APPROVE WITH CHANGES or DO NOT SIGN\",\n  \"next_steps\": \"2-3 specific action items the reviewer should take\"\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -304,
+        272
+      ],
+      "id": "e2d27106-408e-4a75-bd24-8b80631f136e",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        512
+      ],
+      "id": "",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "",
+          "name": "OpenRouter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"contract_type\": \"Service Agreement\",\n  \"parties\": [\"Company A\", \"Company B\"],\n  \"contract_date\": \"2026-01-01\",\n  \"contract_duration\": \"12 months\",\n  \"overall_risk_level\": \"HIGH\",\n  \"risk_score\": 75,\n  \"executive_summary\": \"This is a service agreement between two parties with several high risk clauses.\",\n  \"red_flags\": [\n    {\n      \"clause\": \"Indemnification Clause\",\n      \"issue\": \"One-sided indemnification favoring the client\",\n      \"severity\": \"HIGH\",\n      \"recommendation\": \"Negotiate mutual indemnification\"\n    }\n  ],\n  \"missing_clauses\": [\n    {\n      \"clause\": \"Dispute Resolution\",\n      \"why_important\": \"No process defined for handling disagreements\"\n    }\n  ],\n  \"key_obligations\": [\n    {\n      \"party\": \"Service Provider\",\n      \"obligation\": \"Deliver monthly reports by the 5th of each month\"\n    }\n  ],\n  \"payment_terms\": \"Net 30 days from invoice date\",\n  \"termination_clauses\": \"Either party may terminate with 30 days written notice\",\n  \"liability_cap\": \"Limited to total contract value\",\n  \"governing_law\": \"Laws of England and Wales\",\n  \"recommendation\": \"APPROVE WITH CHANGES\",\n  \"next_steps\": \"1. Renegotiate indemnification clause. 2. Add dispute resolution clause. 3. Clarify liability cap.\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -160,
+        496
+      ],
+      "id": "29d0d244-286b-4017-a993-f489776f699a",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "sendTo": "",
+        "subject": "={{ $json.overall_risk_level === 'CRITICAL' ? '[CRITICAL RISK]' : $json.overall_risk_level === 'HIGH' ? '[HIGH RISK]' : '[Contract Review]' }} {{ $json.file_name }} — {{ $json.recommendation }}",
+        "message": "=<!DOCTYPE html><html><body style='margin:0;padding:0;font-family:Arial,sans-serif;background:#f4f6f9'>\n<div style='max-width:700px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden'>\n\n  <div style='background:{{ $json.risk_color }};padding:30px;text-align:center'>\n    <h1 style='color:#fff;margin:0;font-size:22px'>AI Contract Review Report</h1>\n    <p style='color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:14px'>{{ $json.file_name }}</p>\n  </div>\n\n  <div style='padding:30px'>\n\n    <table style='width:100%;border-collapse:collapse;margin-bottom:20px'>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold;width:40%'>Review ID</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.review_id }}</td>\n      </tr>\n      <tr>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Contract Type</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.contract_type }}</td>\n      </tr>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Parties</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.parties_text }}</td>\n      </tr>\n      <tr>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Contract Date</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.contract_date }}</td>\n      </tr>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Duration</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.contract_duration }}</td>\n      </tr>\n      <tr>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Overall Risk Level</td>\n        <td style='padding:10px;font-size:13px;font-weight:bold;color:{{ $json.risk_color }}'>{{ $json.overall_risk_level }}</td>\n      </tr>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-size:13px;color:#888;font-weight:bold'>Governing Law</td>\n        <td style='padding:10px;font-size:13px;color:#333'>{{ $json.governing_law }}</td>\n      </tr>\n    </table>\n\n    <div style='background:#f0f7ff;border-left:4px solid #2563eb;padding:16px;border-radius:0 6px 6px 0;margin-bottom:24px'>\n      <p style='margin:0 0 6px;font-size:12px;color:#888;font-weight:bold;text-transform:uppercase'>Executive Summary</p>\n      <p style='margin:0;font-size:14px;color:#333;line-height:1.7'>{{ $json.executive_summary }}</p>\n    </div>\n\n    <h3 style='font-size:14px;color:#333;margin:24px 0 12px'>Red Flags ({{ $json.red_flags_count }} found)</h3>\n    <table style='width:100%;border-collapse:collapse;font-size:13px'>\n      <tr style='background:#1a3c5e;color:#fff'>\n        <th style='padding:10px;text-align:left'>Clause</th>\n        <th style='padding:10px;text-align:left'>Issue</th>\n        <th style='padding:10px;text-align:left'>Severity</th>\n        <th style='padding:10px;text-align:left'>Recommendation</th>\n      </tr>\n      {{ $json.red_flags_html }}\n    </table>\n\n    <h3 style='font-size:14px;color:#333;margin:24px 0 12px'>Missing Clauses ({{ $json.missing_clauses_count }} found)</h3>\n    <ul style='font-size:13px;color:#555;line-height:1.8;padding-left:20px'>{{ $json.missing_clauses_html }}</ul>\n\n    <h3 style='font-size:14px;color:#333;margin:24px 0 12px'>Key Obligations</h3>\n    <table style='width:100%;border-collapse:collapse;font-size:13px'>\n      <tr style='background:#f9fafb'>\n        <th style='padding:10px;text-align:left;color:#888'>Party</th>\n        <th style='padding:10px;text-align:left;color:#888'>Obligation</th>\n      </tr>\n      {{ $json.obligations_html }}\n    </table>\n\n    <h3 style='font-size:14px;color:#333;margin:24px 0 12px'>Key Contract Terms</h3>\n    <table style='width:100%;border-collapse:collapse;font-size:13px'>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-weight:bold;color:#888;width:35%'>Payment Terms</td>\n        <td style='padding:10px;color:#333'>{{ $json.payment_terms }}</td>\n      </tr>\n      <tr>\n        <td style='padding:10px;font-weight:bold;color:#888'>Termination</td>\n        <td style='padding:10px;color:#333'>{{ $json.termination_clauses }}</td>\n      </tr>\n      <tr style='background:#f9fafb'>\n        <td style='padding:10px;font-weight:bold;color:#888'>Liability Cap</td>\n        <td style='padding:10px;color:#333'>{{ $json.liability_cap }}</td>\n      </tr>\n    </table>\n\n    <div style='background:{{ $json.recommendation_color }};padding:20px;border-radius:8px;margin:24px 0;text-align:center'>\n      <p style='margin:0 0 6px;font-size:12px;color:rgba(255,255,255,0.8);text-transform:uppercase;letter-spacing:1px'>Final Recommendation</p>\n      <p style='margin:0;font-size:20px;font-weight:bold;color:#fff'>{{ $json.recommendation }}</p>\n    </div>\n\n    <div style='background:#f9fafb;border:1px solid #e5e7eb;padding:16px;border-radius:6px;margin-bottom:20px'>\n      <p style='margin:0 0 8px;font-size:12px;color:#888;font-weight:bold;text-transform:uppercase'>Next Steps</p>\n      <p style='margin:0;font-size:13px;color:#555;line-height:1.7'>{{ $json.next_steps }}</p>\n    </div>\n\n    <p style='text-align:center;margin-top:24px'>\n      <a href='{{ $json.drive_link }}' style='background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:bold'>View Original Contract</a>\n    </p>\n\n  </div>\n\n  <div style='background:#f4f6f9;padding:16px;text-align:center;border-top:1px solid #e5e7eb'>\n    <p style='font-size:11px;color:#9ca3af;margin:0'>This report was generated automatically by the AI Contract Review System. It is intended as a preliminary analysis and does not constitute legal advice. Always consult a qualified legal professional before signing any contract.</p>\n  </div>\n\n</div>\n</body></html>",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "625cfb22-7db0-4e80-a393-7ebc2ff69fbd",
+      "name": "Gmail - Full Risk Report Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        272,
+        464
+      ],
+      "webhookId": "7cdefd29-9cac-4156-a0a4-b9cb3e61bba6",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OjJWLgnvMUPdFc12",
+          "name": "Gmail account"
+        }
+      },
+      "notes": "Replace legal-team@yourcompany.com with the actual recipient email"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Watch Contracts Folder": {
+      "main": [
+        [
+          {
+            "node": "Download Contract PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Contract PDF": {
+      "main": [
+        [
+          {
+            "node": "Extract Text from PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Text from PDF": {
+      "main": [
+        [
+          {
+            "node": "Prepare Contract Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Contract Data": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Format Risk Report": {
+      "main": [
+        [
+          {
+            "node": "Slack — Risk Report Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail - Full Risk Report Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Review to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse & Format Risk Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "72f077a6-ebf9-4787-a999-5777618640da",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5cbbd120c52dc8c0911dbdf390c52a2354702f194fbe4909355bc0904d5febe6"
+  },
+  "id": "d80nTLeyAN6rwqdM",
+  "tags": []
+}
